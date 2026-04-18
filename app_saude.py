@@ -4,7 +4,28 @@ from anthropic import Anthropic
 import requests
 import xml.etree.ElementTree as ET
 import json
-from bs4 import BeautifulSoup  # Nova biblioteca para ler a SciELO
+from bs4 import BeautifulSoup  # Biblioteca para ler a SciELO
+import sqlite3
+from datetime import datetime
+
+
+# ==========================================
+# CONFIGURAÇÃO DO BANCO DE DADOS (SQLite)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect('historico_saude.db', check_same_thread=False)
+    c = conn.cursor()
+    # Tabela para as sessões de chat
+    c.execute('''CREATE TABLE IF NOT EXISTS sessoes 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT, data_criacao TEXT)''')
+    # Tabela para as mensagens de cada sessão
+    c.execute('''CREATE TABLE IF NOT EXISTS mensagens 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, sessao_id INTEGER, role TEXT, content TEXT)''')
+    conn.commit()
+    return conn
+
+
+conn = init_db()
 
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -14,18 +35,67 @@ st.set_page_config(page_title="Assistente Clínico", page_icon="🩺", layout="c
 st.title("🩺 Assistente Clínico")
 
 # ==========================================
-# BARRA LATERAL: CONFIGURAÇÃO DE APIS
+# BARRA LATERAL: HISTÓRICO E CONFIGURAÇÕES
 # ==========================================
 with st.sidebar:
     st.header("🔑 Configurações")
-    st.info("Insira suas chaves de API para iniciar os testes.")
-    groq_api_key = st.text_input("Groq API Key", type="password")
-    claude_api_key = st.text_input("Anthropic (Claude) API Key", type="password")
+
+    # Tenta carregar as chaves ocultas do Streamlit Secrets
+    try:
+        groq_api_key = st.secrets["GROQ_API_KEY"]
+        claude_api_key = st.secrets["CLAUDE_API_KEY"]
+        st.success("🟢 Sistema Conectado e Pronto")
+    except KeyError:
+        # Se não encontrar as chaves (ex: rodando localmente sem configurar), mostra os campos
+        st.warning("⚠️ Chaves não configuradas no servidor.")
+        groq_api_key = st.text_input("Groq API Key", type="password")
+        claude_api_key = st.text_input("Anthropic (Claude) API Key", type="password")
 
     st.divider()
+
+    # --- SEÇÃO DE HISTÓRICO ---
+    st.header("📜 Histórico de Conversas")
+
+    if st.button("➕ Nova Conversa", use_container_width=True):
+        st.session_state.sessao_id = None
+        st.session_state.messages = []
+        st.rerun()
+
+    # Listar conversas anteriores do banco de dados
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, titulo FROM sessoes ORDER BY id DESC")
+    conversas = cursor.fetchall()
+
+    for id_conversas, titulo in conversas:
+        if st.button(f"💬 {titulo[:25]}...", key=f"hist_{id_conversas}", use_container_width=True):
+            st.session_state.sessao_id = id_conversas
+            st.rerun()
+
+    st.divider()
+
+    # --- PARÂMETROS ---
     st.markdown("**Parâmetros de Busca (Federada)**")
     max_artigos = st.slider("Artigos por base (PubMed e SciELO)", 1, 10, 4)
     st.caption(f"Total analisado: até {max_artigos * 2} artigos por pergunta.")
+
+# ==========================================
+# LÓGICA DE CARREGAMENTO DE MENSAGENS DO DB
+# ==========================================
+if "sessao_id" not in st.session_state:
+    st.session_state.sessao_id = None
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Se uma sessão foi selecionada na barra lateral, carrega as mensagens dela
+if st.session_state.sessao_id is not None:
+    cursor = conn.cursor()
+    cursor.execute("SELECT role, content FROM mensagens WHERE sessao_id = ? ORDER BY id ASC",
+                   (st.session_state.sessao_id,))
+    st.session_state.messages = [{"role": r, "content": c} for r, c in cursor.fetchall()]
+elif not st.session_state.messages:
+    # Se não tem sessão e a lista tá vazia, garante que a tela fique limpa
+    st.session_state.messages = []
 
 
 # ==========================================
@@ -53,7 +123,7 @@ def extrair_termos_federados(pergunta, api_key):
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
             temperature=0.1,
-            response_format={"type": "json_object"}  # Força o modelo a responder em JSON
+            response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -99,21 +169,17 @@ def buscar_scielo(termo_busca, max_resultados):
         response = requests.get(url, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # A classe 'item' encapsula cada artigo no portal da SciELO
         artigos = soup.find_all('div', class_='item')
         contexto = []
 
         for art in artigos[:max_resultados]:
-            # Busca o título
             titulo_tag = art.find('strong', class_='title')
             titulo = titulo_tag.text.strip() if titulo_tag else "Sem título"
 
-            # Busca o abstract (Muitos artigos na SciELO expõem o abstract em um div específico ou no link de resumo)
-            # Como a estrutura varia, pegamos o parágrafo de introdução/resumo disponível
             abstract_div = art.find('div', class_='user-abstract') or art.find('div', class_='abstract')
             abs_text = abstract_div.text.strip() if abstract_div else ""
 
-            if abs_text:  # Só adiciona se conseguiu capturar texto relevante
+            if abs_text:
                 contexto.append(f"[Fonte: SciELO] TÍTULO: {titulo}\nRESUMO: {abs_text}")
 
         return "\n\n".join(contexto)
@@ -122,7 +188,7 @@ def buscar_scielo(termo_busca, max_resultados):
 
 
 def sintese_clinica_claude(pergunta, contexto_global, api_key):
-    """Usa o Claude 4.5 Sonnet para fundir as evidências globais (PubMed) e regionais (SciELO)."""
+    """Usa o Claude para fundir as evidências globais (PubMed) e regionais (SciELO)."""
     client = Anthropic(api_key=api_key)
     system_prompt = """
     Você é um assistente médico acadêmico de excelência. Sua função é responder à pergunta do usuário baseando-se EXCLUSIVA E ESTRITAMENTE nos dados fornecidos (Abstracts do PubMed e da SciELO).
@@ -140,7 +206,7 @@ def sintese_clinica_claude(pergunta, contexto_global, api_key):
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-6",  # Mantive o modelo que você inseriu no seu código
             max_tokens=1500,
             temperature=0.2,
             system=system_prompt,
@@ -154,10 +220,7 @@ def sintese_clinica_claude(pergunta, contexto_global, api_key):
 # ==========================================
 # INTERFACE DE CHAT (UI)
 # ==========================================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Renderiza histórico
+# Renderiza histórico atual da tela
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -170,7 +233,22 @@ if prompt := st.chat_input("Sua dúvida clínica..."):
         st.warning("⚠️ Por favor, insira as chaves de API na barra lateral para continuar.")
         st.stop()
 
+    # --- SALVANDO A SESSÃO E A MENSAGEM DO USUÁRIO NO BANCO ---
+    cursor = conn.cursor()
+
+    if st.session_state.sessao_id is None:
+        # Cria uma nova sessão usando a data e a primeira pergunta como título
+        data_atual = datetime.now().strftime("%d/%m/%Y %H:%M")
+        cursor.execute("INSERT INTO sessoes (titulo, data_criacao) VALUES (?, ?)", (prompt, data_atual))
+        st.session_state.sessao_id = cursor.lastrowid
+        conn.commit()
+
+    # Adiciona na tela e no banco a pergunta do usuário
     st.session_state.messages.append({"role": "user", "content": prompt})
+    cursor.execute("INSERT INTO mensagens (sessao_id, role, content) VALUES (?, ?, ?)",
+                   (st.session_state.sessao_id, "user", prompt))
+    conn.commit()
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -179,25 +257,26 @@ if prompt := st.chat_input("Sua dúvida clínica..."):
         resposta_final = ""
 
         with st.spinner("Buscando evidências (PubMed e SciELO)..."):
-            # Passo 1: Gera termos de busca separados (Inglês e Português)
             termos_json = extrair_termos_federados(prompt, groq_api_key)
 
             if "erro" in termos_json:
                 resposta_final = termos_json["erro"]
             else:
-                # Passo 2: Busca simultânea nas duas bases
                 contexto_pubmed = buscar_pubmed(termos_json.get("busca_pubmed", ""), max_artigos)
                 contexto_scielo = buscar_scielo(termos_json.get("busca_scielo", ""), max_artigos)
 
-                # Passo 3: Concatena tudo
                 contexto_global = f"{contexto_pubmed}\n\n{contexto_scielo}".strip()
 
                 if not contexto_global:
                     resposta_final = "Nenhuma evidência científica foi encontrada no PubMed ou na SciELO para estes termos."
                 else:
-                    # Passo 4: O Claude faz a síntese
                     resposta_final = sintese_clinica_claude(prompt, contexto_global, claude_api_key)
 
         # Exibe a resposta final na interface
         st.markdown(resposta_final)
+
+        # --- SALVANDO A RESPOSTA DA IA NO BANCO ---
         st.session_state.messages.append({"role": "assistant", "content": resposta_final})
+        cursor.execute("INSERT INTO mensagens (sessao_id, role, content) VALUES (?, ?, ?)",
+                       (st.session_state.sessao_id, "assistant", resposta_final))
+        conn.commit()
