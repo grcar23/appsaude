@@ -207,7 +207,7 @@ def sintese_clinica_claude(pergunta, contexto_global, api_key):
     try:
         message = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1500,
+            max_tokens=4096,
             temperature=0.2,
             system=system_prompt,
             messages=[{"role": "user", "content": prompt_usuario}]
@@ -296,7 +296,7 @@ if prompt := st.chat_input("Sua dúvida clínica..."):
                     try:
                         msg = client_claude.messages.create(
                             model="claude-sonnet-4-6",
-                            max_tokens=2000,
+                            max_tokens=4096,
                             temperature=0.3,  # Mantido baixo para garantir foco estrutural
                             system=fallback_prompt,
                             messages=[{"role": "user", "content": prompt}]
