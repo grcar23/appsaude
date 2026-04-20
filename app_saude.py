@@ -206,7 +206,7 @@ def sintese_clinica_claude(pergunta, contexto_global, api_key):
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-6",  # Mantive o modelo que você inseriu no seu código
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             temperature=0.2,
             system=system_prompt,
@@ -268,7 +268,42 @@ if prompt := st.chat_input("Sua dúvida clínica..."):
                 contexto_global = f"{contexto_pubmed}\n\n{contexto_scielo}".strip()
 
                 if not contexto_global:
-                    resposta_final = "Nenhuma evidência científica foi encontrada no PubMed ou na SciELO para estes termos."
+                    # ==========================================
+                    # FALLBACK: MODO LIVRO-TEXTO (ANATOMIA/FISIO)
+                    # ==========================================
+                    fallback_prompt = """
+                    Você é um professor titular de medicina em uma universidade de excelência. O usuário fez uma pergunta sobre ciências básicas da saúde (Anatomia, Fisiologia, Histologia, Patologia, Farmacologia, etc.) onde artigos científicos não são a fonte principal de estudo.
+
+                    Sua missão é dar uma "aula" estruturada, didática e de alto rigor acadêmico, baseando-se EXCLUSIVAMENTE na literatura médica clássica e consolidada.
+
+                    REGRAS ABSOLUTAS:
+                    1. AVISO INICIAL: Você DEVE iniciar a sua resposta EXATAMENTE com o seguinte texto em citação:
+                    "> ⚠️ **Modo Ciências Básicas:** Não há ensaios clínicos aplicáveis a esta dúvida estrutural. A resposta abaixo foi gerada com base na literatura acadêmica clássica."
+
+                    2. ESTRUTURA VISUAL: Organize a resposta de forma altamente escaneável:
+                       - Use títulos (###) para dividir os tópicos da pergunta.
+                       - Use **negrito** exclusivamente para destacar termos técnicos, anatômicos ou fisiológicos essenciais.
+                       - Use tópicos (bullet points) para listar características, funções ou camadas. Evite parágrafos muito longos.
+
+                    3. DIDÁTICA: Vá direto ao ponto acadêmico. Descreva as estruturas, vias e funções com precisão cirúrgica de livro-texto.
+
+                    4. BIBLIOGRAFIA DE REFERÊNCIA: Ao final da resposta, adicione uma seção chamada "📚 **Literatura Sugerida**" e liste de 2 a 3 livros-texto clássicos reais onde o usuário pode aprofundar aquele tema específico (ex: Moore ou Gray para Anatomia; Guyton ou Silverthorn para Fisiologia; Robbins para Patologia Básica).
+
+                    5. SEGURANÇA: Não invente vias ou estruturas. Se o tema for ambíguo, atenha-se à base estrutural inquestionável.
+                    """
+
+                    client_claude = Anthropic(api_key=claude_api_key)
+                    try:
+                        msg = client_claude.messages.create(
+                            model="claude-sonnet-4-6",
+                            max_tokens=2000,
+                            temperature=0.3,  # Mantido baixo para garantir foco estrutural
+                            system=fallback_prompt,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        resposta_final = msg.content[0].text
+                    except Exception as e:
+                        resposta_final = f"Erro no Claude (Modo Básico): {e}"
                 else:
                     resposta_final = sintese_clinica_claude(prompt, contexto_global, claude_api_key)
 
