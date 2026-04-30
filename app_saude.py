@@ -2,7 +2,6 @@ import streamlit as st
 from groq import Groq
 from anthropic import Anthropic
 import cohere
-from cohere.errors import CohereAPIError
 import requests
 import xml.etree.ElementTree as ET
 import json
@@ -210,11 +209,9 @@ def rerank_evidencias(pergunta, lista_documentos, api_key):
         )
         filtrados = [lista_documentos[r.index] for r in results.results]
         return filtrados
-    except CohereAPIError as e:
-        st.warning(f"⚠️ Reranker indisponível ({e.status_code}). Acionando ordenação padrão das bases.")
-        return lista_documentos[:5]
-    except Exception:
-        st.warning("⚠️ Instabilidade na rede do Reranker. Acionando fallback seguro.")
+    except Exception as e:
+        # Captura qualquer erro (inclusive os de limite de chave da Cohere) sem depender de imports específicos
+        st.warning(f"⚠️ Reranker indisponível ({e}). Acionando ordenação padrão das bases.")
         return lista_documentos[:5]
 
 
